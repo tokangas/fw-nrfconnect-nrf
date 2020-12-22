@@ -164,6 +164,12 @@ config MODEM_FOTA_SHARED_SECRET
 	  A string of 32 hex characters (0-9, A-F). Shared secret is unique
 	  per-tenant. Must be coordinated with nRF Cloud.
 
+config MODEM_FOTA_STATIC_IP
+	bool "Use static IP addresses for connecting to the servers"
+	help
+	  If enabled, static IP addresses will be used instead of FQDNs for
+	  communication with the FOTA servers.
+
 module=MODEM_FOTA
 module-dep=LOG
 module-str=Modem Firmware Over the Air client

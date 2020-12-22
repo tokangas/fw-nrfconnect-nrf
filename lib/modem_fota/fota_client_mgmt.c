@@ -174,9 +174,11 @@ static const char *job_status_strings[] = {
 static char http_rx_buf[HTTP_RX_BUF_SIZE];
 static enum http_status http_resp_status;
 
-static char * api_ips[NUM_STATIC_IPS] = {
+static const char * const api_ips[NUM_STATIC_IPS] = {
 	API_STATIC_IP_1,
 	API_STATIC_IP_2 };
+
+static const char * used_static_ip = NULL;
 
 /* API hostname (if != NULL overrides the default) */
 static char *api_hostname;
@@ -340,8 +342,9 @@ static int static_ip_connect(int * const fd, const char * const hostname,
 	int ret;
 
 	for (int ip = 0; ip < NUM_STATIC_IPS; ++ip) {
+		used_static_ip = api_ips[ip];
 		ret = do_connect(fd, hostname, port_num, use_fota_apn,
-				 api_ips[ip]);
+				 used_static_ip);
 		if (ret == 0) {
 			break;
 		}
@@ -353,13 +356,20 @@ static int static_ip_connect(int * const fd, const char * const hostname,
 static int cloud_api_connect(int * const fd, const char * const hostname,
 			     const uint16_t port_num, bool use_fota_apn)
 {
-	/* Do not use IP if hostname has been overridden */
-	if (api_hostname) {
+	if (!IS_ENABLED(CONFIG_MODEM_FOTA_STATIC_IP)) {
 		return do_connect(fd, hostname, port_num, use_fota_apn, NULL);
-	}
+	} else {
+		used_static_ip = NULL;
 
-	/* Use static IP(s) for connection */
-	return static_ip_connect(fd, hostname, port_num, use_fota_apn);
+		/* Do not use IP if hostname has been overridden */
+		if (api_hostname) {
+			return do_connect(fd, hostname, port_num,
+					  use_fota_apn, NULL);
+		}
+
+		/* Use static IP(s) for connection */
+		return static_ip_connect(fd, hostname, port_num, use_fota_apn);
+	}
 }
 
 int fota_client_provision_device(void)
@@ -1274,7 +1284,7 @@ static void http_response_cb(struct http_response *rsp,
 int parse_pending_job_response(const char * const resp_buff,
 			       struct fota_client_mgmt_job * const job)
 {
-	char * hostname;
+	const char * hostname;
 	char * start;
 	char * end;
 	size_t len;
@@ -1284,11 +1294,17 @@ int parse_pending_job_response(const char * const resp_buff,
 	job->id = NULL;
 	job->path = NULL;
 
-	/* Get host: use override if exists */
+	/* Get FW server host */
 	if (fw_api_hostname != NULL) {
+		/* Use override */
 		hostname = fw_api_hostname;
 		len = strlen(hostname) + 1;
+	} else if (used_static_ip != NULL) {
+		/* Use static IP */
+		hostname = used_static_ip;
+		len = strlen(hostname) + 1;
 	} else {
+		/* Get host from job document */
 		start = strstr(resp_buff,FW_HOST_BEGIN_STR);
 		if (!start) {
 			err = -ENOMSG;
