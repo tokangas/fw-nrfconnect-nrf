@@ -19,6 +19,7 @@
 #include <sys/base64.h>
 #include <logging/log.h>
 #include "fota_client_mgmt.h"
+#include "modem_fota_internal.h"
 
 LOG_MODULE_REGISTER(fota_client_mgmt, CONFIG_MODEM_FOTA_LOG_LEVEL);
 
@@ -68,17 +69,20 @@ static void http_response_cb(struct http_response *rsp,
 			     void *user_data);
 static int tls_setup(int fd, const char * const tls_hostname);
 static int do_connect(int * const fd, const char * const hostname,
-		      const uint16_t port_num, bool use_fota_apn);
+		      const uint16_t port_num, bool use_fota_apn,
+		      const char * const ip_address);
 static int parse_pending_job_response(const char * const resp_buff,
 				      struct fota_client_mgmt_job * const job);
 
-#define API_HOSTNAME "static.api.beta.nrfcloud.com"
+#define API_STATIC_IP_1 "75.2.37.83"
+#define API_STATIC_IP_2 "99.83.231.82"
+#define NUM_STATIC_IPS 2
+#define API_HOSTNAME "static.api.nrfcloud.com"
 #define API_PORT 443
 #define API_HTTP_TIMEOUT_MS (30000)
-
 #define HTTP_PROTOCOL "HTTP/1.1"
 
-// TODO: determine if it is worth adding JSON parsing library to
+/* TODO: determine if it is worth adding JSON parsing library */
 #define JOB_ID_BEGIN_STR	"\"jobId\":\""
 #define JOB_ID_END_STR		"\""
 #define FW_PATH_BEGIN_STR	"\"path\":\""
@@ -86,7 +90,6 @@ static int parse_pending_job_response(const char * const resp_buff,
 #define FW_HOST_BEGIN_STR	"\"host\":\""
 #define FW_HOST_END_STR		"\","
 #define FW_PATH_PREFIX		"v1/firmwares/modem/"
-#define FW_HOSTNAME 		API_HOSTNAME
 
 #define AUTH_HDR_BEARER_TEMPLATE "Authorization: Bearer %s\r\n"
 #define HOST_HDR_TEMPLATE	 "Host: %s\r\n"
@@ -108,12 +111,12 @@ static int parse_pending_job_response(const char * const resp_buff,
 #define API_GET_JOB_CONTENT_TYPE 	"*/*"
 #define API_GET_JOB_HDR_ACCEPT		"accept: application/json\r\n"
 
-// NOTE:
-//       Ensure that correct dev/beta/prod certs are
-//       installed on the device.
-// TODO: switch to PROD endpoint: "a2n7tk1kp18wix-ats.iot.us-east-1.amazonaws.com"
-//       BETA endpoint to be used for environment stability
-#define JITP_HOSTNAME "a1jtaajis3u27i-ats.iot.us-east-1.amazonaws.com"
+/* NOTE:
+ *  Ensure that correct dev/beta/prod certs are
+ *  installed on the device.
+ *  BETA endpoint: "a1jtaajis3u27i-ats.iot.us-east-1.amazonaws.com"
+ */
+#define JITP_HOSTNAME "a2n7tk1kp18wix-ats.iot.us-east-1.amazonaws.com"
 #define JITP_HOSTNAME_TLS 	JITP_HOSTNAME
 #define JITP_PORT		8443
 #define JITP_URL 	    	"/topics/jitp?qos=1"
@@ -170,6 +173,10 @@ static const char *job_status_strings[] = {
 #define HTTP_RX_BUF_SIZE (4096)
 static char http_rx_buf[HTTP_RX_BUF_SIZE];
 static enum http_status http_resp_status;
+
+static char * api_ips[NUM_STATIC_IPS] = {
+	API_STATIC_IP_1,
+	API_STATIC_IP_2 };
 
 /* API hostname (if != NULL overrides the default) */
 static char *api_hostname;
@@ -236,11 +243,14 @@ static int socket_timeouts_set(int fd)
 }
 
 static int do_connect(int * const fd, const char * const hostname,
-		      const uint16_t port_num, bool use_fota_apn)
+		      const uint16_t port_num, bool use_fota_apn,
+		      const char * const ip_address)
 {
 	int ret;
 	const char *apn = NULL;
 	struct addrinfo *addr_info;
+	/* Use IP to connect if provided, always use hostname for TLS (SNI) */
+	const char * const connect_addr = ip_address ? ip_address : hostname;
 
 	if (use_fota_apn && fota_apn != NULL && strlen(fota_apn) > 0) {
 		apn = fota_apn;
@@ -261,7 +271,7 @@ static int do_connect(int * const fd, const char * const hostname,
 	/* Make sure fd is always initialized when this function is called */
 	*fd = -1;
 
-	ret = getaddrinfo(hostname, NULL, &hints, &addr_info);
+	ret = getaddrinfo(connect_addr, NULL, &hints, &addr_info);
 	if (ret) {
 		LOG_ERR("getaddrinfo() failed, error: %d", errno);
 		return -EFAULT;
@@ -303,7 +313,7 @@ static int do_connect(int * const fd, const char * const hostname,
 		goto error_clean_up;
 	}
 
-	LOG_DBG("Connecting to %s", log_strdup(hostname));
+	LOG_DBG("Connecting to %s", log_strdup(connect_addr));
 
 	ret = connect(*fd, addr_info->ai_addr, sizeof(struct sockaddr_in));
 	if (ret) {
@@ -322,6 +332,34 @@ error_clean_up:
 		*fd = -1;
 	}
 	return ret;
+}
+
+static int static_ip_connect(int * const fd, const char * const hostname,
+			     const uint16_t port_num, bool use_fota_apn)
+{
+	int ret;
+
+	for (int ip = 0; ip < NUM_STATIC_IPS; ++ip) {
+		ret = do_connect(fd, hostname, port_num, use_fota_apn,
+				 api_ips[ip]);
+		if (ret == 0) {
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static int cloud_api_connect(int * const fd, const char * const hostname,
+			     const uint16_t port_num, bool use_fota_apn)
+{
+	/* Do not use IP if hostname has been overridden */
+	if (api_hostname) {
+		return do_connect(fd, hostname, port_num, use_fota_apn, NULL);
+	}
+
+	/* Use static IP(s) for connection */
+	return static_ip_connect(fd, hostname, port_num, use_fota_apn);
 }
 
 int fota_client_provision_device(void)
@@ -344,7 +382,7 @@ int fota_client_provision_device(void)
 	req.recv_buf_len = sizeof(http_rx_buf);
 	http_resp_status = HTTP_STATUS_NONE;
 
-	ret = do_connect(&fd, JITP_HOSTNAME, JITP_PORT, false);
+	ret = do_connect(&fd, JITP_HOSTNAME, JITP_PORT, false, NULL);
 	if (ret) {
 		return ret;
 	}
@@ -408,12 +446,9 @@ int fota_client_get_pending_job(struct fota_client_mgmt_job * const job)
 	char * auth_hdr = NULL;
 	char * host_hdr = NULL;
 	char * device_id = get_device_id_string();
-	char * hostname = API_HOSTNAME;
+	char * hostname = get_api_hostname();
 	uint16_t port = API_PORT;
 
-	if (api_hostname != NULL) {
-		hostname = api_hostname;
-	}
 	if (api_port != 0) {
 		port = api_port;
 	}
@@ -480,7 +515,7 @@ int fota_client_get_pending_job(struct fota_client_mgmt_job * const job)
 	req.recv_buf_len = sizeof(http_rx_buf);
 	http_resp_status = HTTP_STATUS_NONE;
 
-	ret = do_connect(&fd, hostname, port, true);
+	ret = cloud_api_connect(&fd, hostname, port, true);
 	if (ret) {
 		goto clean_up;
 	}
@@ -550,13 +585,10 @@ int fota_client_update_job(const struct fota_client_mgmt_job * job)
 	char * auth_hdr =  NULL;
 	char * host_hdr = NULL;
 	char * payload = NULL;
-	char * hostname = API_HOSTNAME;
+	char * hostname = get_api_hostname();
 	char * device_id = NULL;
 	uint16_t port = API_PORT;
 
-	if (api_hostname != NULL) {
-		hostname = api_hostname;
-	}
 	if (api_port != 0) {
 		port = api_port;
 	}
@@ -643,7 +675,7 @@ int fota_client_update_job(const struct fota_client_mgmt_job * job)
 	req.recv_buf_len = sizeof(http_rx_buf);
 	http_resp_status = HTTP_STATUS_NONE;
 
-	ret = do_connect(&fd, hostname, port, true);
+	ret = cloud_api_connect(&fd, hostname, port, true);
 	if (ret) {
 		goto clean_up;
 	}
@@ -701,13 +733,10 @@ int fota_client_set_device_state(void)
 	char * auth_hdr =  NULL;
 	char * host_hdr = NULL;
 	char * payload = NULL;
-	char * hostname = API_HOSTNAME;
+	char * hostname = get_api_hostname();
 	char * device_id = get_device_id_string();
 	char * mfw_ver = get_mfw_version_string();
 
-	if (api_hostname != NULL) {
-		hostname = api_hostname;
-	}
 	if (api_port != 0) {
 		port = api_port;
 	}
@@ -785,7 +814,7 @@ int fota_client_set_device_state(void)
 	req.recv_buf_len = sizeof(http_rx_buf);
 	http_resp_status = HTTP_STATUS_NONE;
 
-	ret = do_connect(&fd, hostname, port, true);
+	ret = cloud_api_connect(&fd, hostname, port, true);
 	if (ret) {
 		goto clean_up;
 	}
@@ -1403,7 +1432,7 @@ void set_api_port(uint16_t port)
 char *get_fw_api_hostname()
 {
 	if (fw_api_hostname == NULL)
-		return FW_HOSTNAME;
+		return API_HOSTNAME;
 	else
 		return fw_api_hostname;
 }
