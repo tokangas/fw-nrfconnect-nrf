@@ -35,15 +35,15 @@ static int fota_cmd_server(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	set_api_hostname(argv[1]);
-	set_api_port(port);
+	set_api_override(argv[1]);
+	set_api_port_override(port);
 
 	return 0;
 }
 
 static int fota_cmd_fw_server(const struct shell *shell, size_t argc, char **argv)
 {
-	set_fw_api_hostname(argv[1]);
+	set_fw_api_override(argv[1]);
 
 	return 0;
 }
@@ -76,6 +76,7 @@ static int fota_cmd_status(const struct shell *shell, size_t argc, char **argv)
 {
 	uint32_t time_to_check;
 	uint32_t time_to_check_without_days;
+	const char *fw_api_address;
 
 	shell_print(shell, "FOTA %s",
 		    is_fota_enabled() ? "enabled" : "disabled");
@@ -91,9 +92,13 @@ static int fota_cmd_status(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "Next update check not scheduled or no " \
 				   "network time");
 	}
-	shell_print(shell, "DM server hostname: %s", get_api_hostname());
+	shell_print(shell, "DM server address: %s", get_api_address());
 	shell_print(shell, "DM server port: %d", get_api_port());
-	shell_print(shell, "FW download server hostname: %s", get_fw_api_hostname());
+	fw_api_address = get_fw_api_address();
+	if (fw_api_address == NULL) {
+		fw_api_address = "got from FOTA job";
+	}
+	shell_print(shell, "FW download server address: %s", fw_api_address);
 
 	return 0;
 }

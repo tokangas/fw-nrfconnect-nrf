@@ -73,6 +73,7 @@ static int do_connect(int * const fd, const char * const hostname,
 		      const char * const ip_address);
 static int parse_pending_job_response(const char * const resp_buff,
 				      struct fota_client_mgmt_job * const job);
+static char *get_api_hostname(void);
 
 #define API_STATIC_IP_1 "75.2.37.83"
 #define API_STATIC_IP_2 "99.83.231.82"
@@ -180,12 +181,12 @@ static const char * const api_ips[NUM_STATIC_IPS] = {
 
 static const char * used_static_ip = NULL;
 
-/* API hostname (if != NULL overrides the default) */
-static char *api_hostname;
-/* API port number (if != 0 overrides the default) */
-static uint16_t api_port;
-/* FW API hostname (if != NULL overrides the default) */
-static char *fw_api_hostname;
+/* API hostname override (if != NULL overrides the default) */
+static char *api_override;
+/* API port number override (if != 0 overrides the default) */
+static uint16_t api_port_override;
+/* FW API hostname override (if != NULL overrides the default) */
+static char *fw_api_override;
 
 extern const char *fota_apn;
 
@@ -362,7 +363,7 @@ static int cloud_api_connect(int * const fd, const char * const hostname,
 		used_static_ip = NULL;
 
 		/* Do not use IP if hostname has been overridden */
-		if (api_hostname) {
+		if (api_override) {
 			return do_connect(fd, hostname, port_num,
 					  use_fota_apn, NULL);
 		}
@@ -457,11 +458,7 @@ int fota_client_get_pending_job(struct fota_client_mgmt_job * const job)
 	char * host_hdr = NULL;
 	char * device_id = get_device_id_string();
 	char * hostname = get_api_hostname();
-	uint16_t port = API_PORT;
-
-	if (api_port != 0) {
-		port = api_port;
-	}
+	uint16_t port = get_api_port();;
 
 	memset(job,0,sizeof(*job));
 	job_data.data.job = job;
@@ -596,12 +593,8 @@ int fota_client_update_job(const struct fota_client_mgmt_job * job)
 	char * host_hdr = NULL;
 	char * payload = NULL;
 	char * hostname = get_api_hostname();
+	uint16_t port = get_api_port();
 	char * device_id = NULL;
-	uint16_t port = API_PORT;
-
-	if (api_port != 0) {
-		port = api_port;
-	}
 
 	ret = generate_jwt(NULL,&jwt);
 	if (ret < 0){
@@ -737,19 +730,15 @@ int fota_client_set_device_state(void)
 	struct http_request req;
 	struct http_user_data dev_state = { .type = HTTP_REQ_TYPE_DEV_STATE };
 	size_t buff_size;
-	uint16_t port = API_PORT;
 	char * jwt = NULL;
 	char * url = NULL;
 	char * auth_hdr =  NULL;
 	char * host_hdr = NULL;
 	char * payload = NULL;
 	char * hostname = get_api_hostname();
+	uint16_t port = get_api_port();
 	char * device_id = get_device_id_string();
 	char * mfw_ver = get_mfw_version_string();
-
-	if (api_port != 0) {
-		port = api_port;
-	}
 
 	ret = generate_jwt(device_id,&jwt);
 	if (ret < 0){
@@ -1144,7 +1133,7 @@ static char * get_mfw_version_string(void)
 	return mfw_version;
 }
 
-char * get_base64url_string(const char * const input, const size_t input_size)
+static char * get_base64url_string(const char * const input, const size_t input_size)
 {
 	if (!input || !input_size) {
 		LOG_ERR("Invalid input buffer");
@@ -1184,7 +1173,7 @@ char * get_base64url_string(const char * const input, const size_t input_size)
 	return output_str;
 }
 
-void base64_url_format(char * const base64_string)
+static void base64_url_format(char * const base64_string)
 {
 	if (base64_string == NULL) {
 		return;
@@ -1281,8 +1270,8 @@ static void http_response_cb(struct http_response *rsp,
 	}
 }
 
-int parse_pending_job_response(const char * const resp_buff,
-			       struct fota_client_mgmt_job * const job)
+static int parse_pending_job_response(const char * const resp_buff,
+				      struct fota_client_mgmt_job * const job)
 {
 	const char * hostname;
 	char * start;
@@ -1295,9 +1284,9 @@ int parse_pending_job_response(const char * const resp_buff,
 	job->path = NULL;
 
 	/* Get FW server host */
-	if (fw_api_hostname != NULL) {
+	if (fw_api_override != NULL) {
 		/* Use override */
-		hostname = fw_api_hostname;
+		hostname = fw_api_override;
 		len = strlen(hostname) + 1;
 	} else if (used_static_ip != NULL) {
 		/* Use static IP */
@@ -1375,7 +1364,7 @@ error_clean_up:
 	return err;
 }
 
-int tls_setup(int fd, const char * const tls_hostname)
+static int tls_setup(int fd, const char * const tls_hostname)
 {
 	int err;
 	int verify;
@@ -1415,49 +1404,67 @@ int tls_setup(int fd, const char * const tls_hostname)
 	return 0;
 }
 
-char *get_api_hostname()
+static char *get_api_hostname()
 {
-	if (api_hostname == NULL)
+	if (api_override == NULL)
 		return API_HOSTNAME;
 	else
-		return api_hostname;
+		return api_override;
 }
 
-void set_api_hostname(const char *hostname)
+const char *get_api_address()
 {
-	k_free(api_hostname);
-	api_hostname = k_malloc(strlen(hostname) + 1);
-	if (api_hostname != NULL) {
-		strcpy(api_hostname, hostname);
+	if (api_override == NULL) {
+		if (IS_ENABLED(CONFIG_MODEM_FOTA_STATIC_IP)) {
+			return api_ips[0];
+		} else {
+			return API_HOSTNAME;
+		}
+	} else {
+		return api_override;
+	}
+}
+
+void set_api_override(const char *hostname)
+{
+	k_free(api_override);
+	api_override = k_malloc(strlen(hostname) + 1);
+	if (api_override != NULL) {
+		strcpy(api_override, hostname);
 	}
 }
 
 uint16_t get_api_port()
 {
-	if (api_port == 0)
+	if (api_port_override == 0)
 		return API_PORT;
 	else
-		return api_port;
+		return api_port_override;
 }
 
-void set_api_port(uint16_t port)
+void set_api_port_override(uint16_t port)
 {
-	api_port = port;
+	api_port_override = port;
 }
 
-char *get_fw_api_hostname()
+const char *get_fw_api_address()
 {
-	if (fw_api_hostname == NULL)
-		return API_HOSTNAME;
-	else
-		return fw_api_hostname;
+	if (fw_api_override == NULL) {
+		if (IS_ENABLED(CONFIG_MODEM_FOTA_STATIC_IP)) {
+			return api_ips[0];
+		} else {
+			return NULL;
+		}
+	} else {
+		return fw_api_override;
+	}
 }
 
-void set_fw_api_hostname(const char *hostname)
+void set_fw_api_override(const char *hostname)
 {
-	k_free(fw_api_hostname);
-	fw_api_hostname = k_malloc(strlen(hostname) + 1);
-	if (fw_api_hostname != NULL) {
-		strcpy(fw_api_hostname, hostname);
+	k_free(fw_api_override);
+	fw_api_override = k_malloc(strlen(hostname) + 1);
+	if (fw_api_override != NULL) {
+		strcpy(fw_api_override, hostname);
 	}
 }

@@ -26,17 +26,17 @@ uint32_t get_time_to_next_update_check(void);
 
 void set_time_to_next_update_check(uint32_t seconds);
 
-char *get_api_hostname(void);
+const char *get_api_address(void);
 
-void set_api_hostname(const char *hostname);
+void set_api_override(const char *hostname);
 
 uint16_t get_api_port(void);
 
-void set_api_port(uint16_t port);
+void set_api_port_override(uint16_t port);
 
-char *get_fw_api_hostname(void);
+const char *get_fw_api_address(void);
 
-void set_fw_api_hostname(const char *hostname);
+void set_fw_api_override(const char *hostname);
 
 #ifdef __cplusplus
 }
