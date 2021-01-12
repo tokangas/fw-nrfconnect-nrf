@@ -18,17 +18,11 @@
 #include <tinycrypt/constants.h>
 #include <sys/base64.h>
 #include <logging/log.h>
+#include <modem/modem_fota.h>
 #include "fota_client_mgmt.h"
 #include "modem_fota_internal.h"
 
 LOG_MODULE_REGISTER(fota_client_mgmt, CONFIG_MODEM_FOTA_LOG_LEVEL);
-
-/* TODO: The nrf-<IMEI> format is for testing/certification only
- * Device ID will become a GUID for production code.
- */
-#define DEV_ID_PREFIX "nrf-"
-#define IMEI_LEN (15)
-#define DEV_ID_BUFF_SIZE (sizeof(DEV_ID_PREFIX) + IMEI_LEN + 2)
 
 /* NOTE: The AT command "request revision identification"
  * can return up to 2048 bytes.  That is limited here to a more
@@ -43,7 +37,8 @@ LOG_MODULE_REGISTER(fota_client_mgmt, CONFIG_MODEM_FOTA_LOG_LEVEL);
 #define JWT_HEADER_B64 "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 /* JWT payload: {"deviceIdentifier":"nrf-<IMEI>"} */
 #define JWT_PAYLOAD_TEMPLATE "{\"deviceIdentifier\":\"%s\"}"
-#define JWT_PAYLOAD_BUFF_SIZE (sizeof(JWT_PAYLOAD_TEMPLATE) + DEV_ID_BUFF_SIZE)
+#define JWT_PAYLOAD_BUFF_SIZE (sizeof(JWT_PAYLOAD_TEMPLATE) + \
+			       MODEM_FOTA_DEVICE_ID_MAX_LEN)
 
 #define GET_BASE64_LEN(n) (((4 * n / 3) + 3) & ~3)
 /* <b64 header>.<b64 payload>.<b64 signature><NULL> */
@@ -58,7 +53,6 @@ static int generate_host_header(const char * const hostname,
 static void base64_url_format(char * const base64_string);
 static char * get_base64url_string(const char * const input,
 				   const size_t input_size);
-static char * get_device_id_string(void);
 static char * get_mfw_version_string(void);
 static int get_signature(const uint8_t * const data_in,
 			 const size_t data_in_size,
@@ -188,6 +182,7 @@ static uint16_t api_port_override;
 /* FW API hostname override (if != NULL overrides the default) */
 static char *fw_api_override;
 
+extern const char fota_device_id[MODEM_FOTA_DEVICE_ID_MAX_LEN + 1];
 extern const char *fota_apn;
 
 static int socket_apn_set(int fd, const char *apn)
@@ -456,32 +451,26 @@ int fota_client_get_pending_job(struct fota_client_mgmt_job * const job)
 	char * url = NULL;
 	char * auth_hdr = NULL;
 	char * host_hdr = NULL;
-	char * device_id = get_device_id_string();
 	char * hostname = get_api_hostname();
 	uint16_t port = get_api_port();;
 
 	memset(job,0,sizeof(*job));
 	job_data.data.job = job;
 
-	if (!device_id) {
-		ret = -ENXIO;
-		goto clean_up;
-	}
-
-	ret = generate_jwt(device_id,&jwt);
+	ret = generate_jwt(fota_device_id,&jwt);
 	if (ret < 0){
 		LOG_ERR("Failed to generate JWT, error: %d", ret);
 		goto clean_up;
 	}
 
 	/* Format API URL with device ID */
-	buff_size = sizeof(API_GET_JOB_URL_TEMPLATE) + strlen(device_id);
+	buff_size = sizeof(API_GET_JOB_URL_TEMPLATE) + strlen(fota_device_id);
 	url = k_calloc(buff_size, 1);
 	if (!url) {
 		ret = -ENOMEM;
 		goto clean_up;
 	}
-	ret = snprintk(url, buff_size, API_GET_JOB_URL_TEMPLATE, device_id);
+	ret = snprintk(url, buff_size, API_GET_JOB_URL_TEMPLATE, fota_device_id);
 	if (ret < 0 || ret >= buff_size) {
 		LOG_ERR("Could not format URL");
 		ret = -ENOBUFS;
@@ -558,9 +547,6 @@ clean_up:
 	if (jwt) {
 		k_free(jwt);
 	}
-	if (device_id) {
-		k_free(device_id);
-	}
 	if (url) {
 		k_free(url);
 	}
@@ -594,23 +580,16 @@ int fota_client_update_job(const struct fota_client_mgmt_job * job)
 	char * payload = NULL;
 	char * hostname = get_api_hostname();
 	uint16_t port = get_api_port();
-	char * device_id = NULL;
 
-	ret = generate_jwt(NULL,&jwt);
+	ret = generate_jwt(fota_device_id,&jwt);
 	if (ret < 0){
 		LOG_ERR("Failed to generate JWT, error: %d", ret);
 		goto clean_up;
 	}
 
 	/* Format API URL with device ID and job ID */
-	device_id = get_device_id_string();
-	if (!device_id) {
-		ret = -ENOMEM;
-		goto clean_up;
-	}
-
 	buff_size = sizeof(API_UPDATE_JOB_URL_TEMPLATE) +
-		    strlen(device_id) + strlen(job->id);
+		    strlen(fota_device_id) + strlen(job->id);
 
 	url = k_calloc(buff_size, 1);
 	if (!url) {
@@ -618,7 +597,7 @@ int fota_client_update_job(const struct fota_client_mgmt_job * job)
 		goto clean_up;
 	}
 	ret = snprintk(url, buff_size, API_UPDATE_JOB_URL_TEMPLATE,
-		       device_id,
+		       fota_device_id,
 		       job->id);
 	if (ret < 0 || ret >= buff_size) {
 		LOG_ERR("Could not format URL");
@@ -716,9 +695,6 @@ clean_up:
 	if (payload) {
 		k_free(payload);
 	}
-	if (device_id) {
-		k_free(device_id);
-	}
 
 	return ret;
 }
@@ -737,23 +713,22 @@ int fota_client_set_device_state(void)
 	char * payload = NULL;
 	char * hostname = get_api_hostname();
 	uint16_t port = get_api_port();
-	char * device_id = get_device_id_string();
 	char * mfw_ver = get_mfw_version_string();
 
-	ret = generate_jwt(device_id,&jwt);
+	ret = generate_jwt(fota_device_id,&jwt);
 	if (ret < 0){
 		LOG_ERR("Failed to generate JWT, error: %d", ret);
 		goto clean_up;
 	}
 
 	/* Format API URL with device ID */
-	buff_size = sizeof(API_DEV_STATE_URL_TEMPLATE) + strlen(device_id);
+	buff_size = sizeof(API_DEV_STATE_URL_TEMPLATE) + strlen(fota_device_id);
 	url = k_calloc(buff_size, 1);
 	if (!url) {
 		ret = -ENOMEM;
 		goto clean_up;
 	}
-	ret = snprintk(url, buff_size, API_DEV_STATE_URL_TEMPLATE, device_id);
+	ret = snprintk(url, buff_size, API_DEV_STATE_URL_TEMPLATE, fota_device_id);
 	if (ret < 0 || ret >= buff_size) {
 		LOG_ERR("Could not format URL");
 		ret = -ENOBUFS;
@@ -839,9 +814,6 @@ clean_up:
 	if (jwt) {
 		k_free(jwt);
 	}
-	if (device_id) {
-		k_free(device_id);
-	}
 	if (mfw_ver) {
 		k_free(mfw_ver);
 	}
@@ -922,28 +894,14 @@ static int generate_jwt(const char * const device_id, char ** jwt_out)
 	char * jwt_buff;
 	char * jwt_sig_b64;
 	char * jwt_payload_b64;
-	char * dev_id = NULL;
 	size_t jwt_len = 0;
 
 	*jwt_out = NULL;
 
-	/* Get device ID if it was not provided */
-	if (!device_id) {
-		dev_id = get_device_id_string();
-		if (!dev_id) {
-			LOG_ERR("Could not get device ID string");
-			return -ENODEV;
-		}
-	}
-
 	/* Add device ID to JWT payload */
 	ret = snprintk(jwt_payload, sizeof(jwt_payload),
 		       JWT_PAYLOAD_TEMPLATE,
-		       device_id ? device_id : dev_id);
-	if (dev_id) {
-		k_free(dev_id);
-		dev_id = NULL;
-	}
+		       device_id);
 	if (ret < 0 || ret >= sizeof(jwt_payload)) {
 		LOG_ERR("Could not format JWT payload");
 		return -ENOBUFS;
@@ -1058,44 +1016,6 @@ static int get_signature(const uint8_t * const data_in,
 	LOG_HEXDUMP_DBG(data_out, TC_SHA256_DIGEST_SIZE, "HMAC hex");
 
 	return 0;
-}
-
-static char * get_device_id_string(void)
-{
-	int ret;
-	enum at_cmd_state state;
-	size_t dev_id_len;
-	char * dev_id = k_calloc(DEV_ID_BUFF_SIZE,1);
-
-	if (!dev_id) {
-		LOG_ERR("Could not allocate memory for device ID");
-		return NULL;
-	}
-
-	ret = snprintk(dev_id, DEV_ID_BUFF_SIZE,"%s", DEV_ID_PREFIX);
-	if (ret < 0 || ret >= DEV_ID_BUFF_SIZE) {
-		LOG_ERR("Could not format device ID");
-		k_free(dev_id);
-		return NULL;
-	}
-	dev_id_len = ret;
-
-	at_cmd_init();
-
-	ret = at_cmd_write("AT+CGSN",
-			   &dev_id[dev_id_len],
-			   DEV_ID_BUFF_SIZE - dev_id_len,
-			   &state);
-	if (ret) {
-		LOG_ERR("Failed to get IMEI, error: %d", ret);
-		k_free(dev_id);
-		return NULL;
-	}
-
-	dev_id_len += IMEI_LEN; /* remove /r/n from AT cmd result */
-	dev_id[dev_id_len] = 0;
-
-	return dev_id;
 }
 
 static char * get_mfw_version_string(void)

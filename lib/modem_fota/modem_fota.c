@@ -146,6 +146,7 @@ static const char job_status_canceled[] = "CANCELED";
 static const char job_status_unknown[] = "UNKNOWN JOB STATUS";
 
 static modem_fota_callback_t event_callback;
+char fota_device_id[MODEM_FOTA_DEVICE_ID_MAX_LEN + 1];
 
 /* Modem time (milliseconds since epoch) and timestamp when it was got */
 static int64_t modem_time;
@@ -2244,14 +2245,22 @@ static int register_xtime_notification(void)
 	return err;
 }
 
-int modem_fota_init(modem_fota_callback_t callback)
+int modem_fota_init(modem_fota_callback_t callback, const char *device_id)
 {
 	int err = 0;
+	size_t device_id_len;
 
-	if (callback == NULL)
+	if (callback == NULL || device_id == NULL) {
 		return -EINVAL;
+	}
 
 	event_callback = callback;
+
+	device_id_len = strlen(device_id);
+	if (device_id_len > MODEM_FOTA_DEVICE_ID_MAX_LEN) {
+		return -EINVAL;
+	}
+	strcpy(fota_device_id, device_id);
 
 #if !defined CONFIG_MODEM_FOTA_CARRIER_LIB
 	if (strlen(CONFIG_MODEM_FOTA_APN) > 0) {

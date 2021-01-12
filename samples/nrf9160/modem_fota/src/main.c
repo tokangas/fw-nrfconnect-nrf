@@ -15,6 +15,13 @@
 #include <modem/at_notif.h>
 #include <modem/modem_fota.h>
 
+/* For Nordic devices (for example the nRF9160 DK) the device ID is format
+ * "nrf-<IMEI>".
+ */
+#define DEV_ID_PREFIX "nrf-"
+#define IMEI_LEN (15)
+#define DEV_ID_BUFF_SIZE (sizeof(DEV_ID_PREFIX) + IMEI_LEN + 2)
+
 void ping_init(void);
 
 void bsd_recoverable_error_handler(uint32_t err)
@@ -22,7 +29,7 @@ void bsd_recoverable_error_handler(uint32_t err)
 	printk("bsdlib recoverable error: %u\n", err);
 }
 
-void modem_fota_callback(enum modem_fota_evt_id event_id)
+static void modem_fota_callback(enum modem_fota_evt_id event_id)
 {
 	switch (event_id) {
 	case MODEM_FOTA_EVT_CHECKING_FOR_UPDATE:
@@ -46,9 +53,45 @@ void modem_fota_callback(enum modem_fota_evt_id event_id)
 	}
 }
 
+static char *get_device_id_string(void)
+{
+	int ret;
+	enum at_cmd_state state;
+	size_t dev_id_len;
+	char * dev_id = k_calloc(DEV_ID_BUFF_SIZE,1);
+
+	if (!dev_id) {
+		return NULL;
+	}
+
+	ret = snprintk(dev_id, DEV_ID_BUFF_SIZE,"%s", DEV_ID_PREFIX);
+	if (ret < 0 || ret >= DEV_ID_BUFF_SIZE) {
+		k_free(dev_id);
+		return NULL;
+	}
+	dev_id_len = ret;
+
+	at_cmd_init();
+
+	ret = at_cmd_write("AT+CGSN",
+			   &dev_id[dev_id_len],
+			   DEV_ID_BUFF_SIZE - dev_id_len,
+			   &state);
+	if (ret) {
+		k_free(dev_id);
+		return NULL;
+	}
+
+	dev_id_len += IMEI_LEN; /* remove /r/n from AT cmd result */
+	dev_id[dev_id_len] = 0;
+
+	return dev_id;
+}
+
 void main(void)
 {
 	int err;
+	char *device_id;
 
 	printk("Modem FOTA sample started\n");
 
@@ -90,10 +133,16 @@ void main(void)
 	at_cmd_init();
 	at_notif_init();
 
-	if (modem_fota_init(&modem_fota_callback) != 0) {
+	device_id = get_device_id_string();
+	__ASSERT(device_id != NULL, "Could not get device ID string");
+
+	if (modem_fota_init(&modem_fota_callback, device_id) != 0) {
 		printk("Failed to initialize modem FOTA\n");
+		k_free(device_id);
 		return;
 	}
+
+	k_free(device_id);
 
 	printk("LTE link connecting...\n");
 	err = lte_lc_init_and_connect();

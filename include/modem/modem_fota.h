@@ -20,6 +20,12 @@ extern "C" {
 #endif
 
 /**
+ * @brief Maximum length for the device ID string (not including the
+ *        terminating null).
+ */
+#define MODEM_FOTA_DEVICE_ID_MAX_LEN 64
+
+/**
  * @brief Modem FOTA event IDs.
  */
 enum modem_fota_evt_id {
@@ -46,11 +52,16 @@ typedef void (*modem_fota_callback_t)(enum modem_fota_evt_id event_id);
  * This API must be called before LTE attach.
  *
  * @param callback Callback for the generated events.
+ * @param device_id nRFCloud device ID. The device ID must be a globally unique
+ *                  string, for example a GUID. The device ID is used to
+ *                  associate the device to an account and to create FOTA jobs
+ *                  for the device. See MODEM_FOTA_DEVICE_ID_MAX_LEN for
+ *                  maximum string length.
  *
  * @retval 0 If the operation was successful.
  *           Otherwise, a (negative) error code is returned.
  */
-int modem_fota_init(modem_fota_callback_t callback);
+int modem_fota_init(modem_fota_callback_t callback, const char *device_id);
 
 /**
  * @brief Configure the modem FOTA client.
