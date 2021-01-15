@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: LicenseRef-BSD-5-Clause-Nordic
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <date_time.h>
 #include <zephyr.h>
@@ -112,6 +113,8 @@ K_TIMER_DEFINE(active_time_timer, active_time_timer_handler, NULL);
 #define AT_CGDCONT_RESPONSE_MAX_LEN	128
 #define AT_CGDCONT_PARAMS_COUNT		4
 #define AT_CGDCONT_APN_INDEX            3
+#define AT_CMNG_TYPE_ROOT_CA_CERT	0
+#define AT_CMNG_TYPE_CLIENT_CERT	1
 
 #define AT_XMONITOR_ACTIVE_TIME_UNIT_MASK	0xe0
 #define AT_XMONITOR_ACTIVE_TIME_UNIT_2S		0x00
@@ -135,6 +138,8 @@ static const char at_xmodemuuid[] = "AT\%XMODEMUUID";
 static const char at_xapnstatus_read[] = "AT\%XAPNSTATUS?";
 static const char at_xapnstatus_template[] = "AT%%XAPNSTATUS=%d,\"%s\"";
 static const char at_cgdcont_read[] = "AT+CGDCONT?";
+static const char at_cmng_list_template[] = "AT%%CMNG=1,%d,%d";
+static const char at_cmng_write_template[] = "AT%%CMNG=0,%d,%d,\"%s\"";
 static const char job_status_queued[] = "QUEUED";
 static const char job_status_in_progress[] = "IN PROGRESS";
 static const char job_status_succeeded[] = "SUCCEEDED";
@@ -144,6 +149,11 @@ static const char job_status_rejected[] = "REJECTED";
 static const char job_status_downloading[] = "DOWNLOADING";
 static const char job_status_canceled[] = "CANCELED";
 static const char job_status_unknown[] = "UNKNOWN JOB STATUS";
+
+/* AWS root CA certificate */
+static const char root_ca_cert[] = {
+	#include "cert/Amazon-Root-CA-1"
+};
 
 static modem_fota_callback_t event_callback;
 char fota_device_id[MODEM_FOTA_DEVICE_ID_MAX_LEN + 1];
@@ -189,6 +199,8 @@ static uint32_t prev_system_mode_bitmask = 0;
 static bool restore_apn_status_needed = false;
 
 static bool reboot_pending = false;
+
+static bool provisioning_enabled = true;
 
 static int settings_set(const char *name, size_t len,
 		settings_read_cb read_cb, void *cb_arg)
@@ -1498,7 +1510,7 @@ static void start_update_work_fn(struct k_work *item)
 	 */
 	clear_update_check_time();
 
-	if (!provisioning_done) {
+	if (provisioning_enabled && !provisioning_done) {
 		/* Provisioning has failed earlier, retry */
 		k_work_submit_to_queue(&work_q, &provision_work);
 		return;
@@ -1933,7 +1945,7 @@ static void schedule_next_update(void)
 		return;
 	}
 
-	if (!provisioning_done) {
+	if (provisioning_enabled && !provisioning_done) {
 		/* Device needs to be provisioned for FOTA service */
 		k_work_submit_to_queue(&work_q, &provision_work);
 		return;
@@ -2245,6 +2257,72 @@ static int register_xtime_notification(void)
 	return err;
 }
 
+static int write_ca_cert(void)
+{
+	int err;
+	char *buf;
+
+	err = 0;
+
+	buf = k_malloc(1280);
+	if (buf == NULL) {
+		err = -ENOMEM;
+		goto clean_up;
+	}
+
+	sprintf(buf, at_cmng_write_template, CONFIG_MODEM_FOTA_TLS_SECURITY_TAG,
+		AT_CMNG_TYPE_ROOT_CA_CERT, root_ca_cert);
+	err = at_cmd_write(buf, NULL, 0, NULL);
+	if (err) {
+		goto clean_up;
+	}
+
+clean_up:
+	k_free(buf);
+
+	return err;
+}
+
+static void check_certs(void)
+{
+	int err;
+	char buf[128];
+
+	/* Check if the AWS root CA is stored in the modem */
+	sprintf(buf, at_cmng_list_template, CONFIG_MODEM_FOTA_TLS_SECURITY_TAG,
+		AT_CMNG_TYPE_ROOT_CA_CERT);
+	err = at_cmd_write(buf, buf, 128, NULL);
+	if (err) {
+		LOG_ERR("Failed to check CA certificate, error: %d", err);
+		return;
+	}
+
+	if (strlen(buf) == 0) {
+		/* No CA certificate found, write it */
+		err = write_ca_cert();
+		if (err) {
+			LOG_ERR("Failed to write CA certificate, error: %d", err);
+		} else {
+			LOG_INF("CA certificate written to modem");
+		}
+	}
+
+	/* Check if the client certificate is stored in the modem */
+	sprintf(buf, at_cmng_list_template, CONFIG_MODEM_FOTA_TLS_SECURITY_TAG,
+		AT_CMNG_TYPE_CLIENT_CERT);
+	err = at_cmd_write(buf, buf, 128, NULL);
+	if (err) {
+		LOG_ERR("Failed to check client certificate, error: %d", err);
+		return;
+	}
+
+	if (strlen(buf) == 0) {
+		/* No client certificate found */
+		provisioning_enabled = false;
+		LOG_DBG("No client certificate, provisioning disabled");
+	}
+}
+
 int modem_fota_init(modem_fota_callback_t callback, const char *device_id)
 {
 	int err = 0;
@@ -2298,6 +2376,8 @@ int modem_fota_init(modem_fota_callback_t callback, const char *device_id)
 
 	at_notif_register_handler(NULL, at_notification_handler);
 	register_xtime_notification();
+
+	check_certs();
 
 	if (update_job_id != NULL) {
 		update_job_status_after_apply();
